@@ -1,0 +1,2 @@
+- POST /analyze with multipart form file
+- GET /health
