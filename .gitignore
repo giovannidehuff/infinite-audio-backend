@@ -1,23 +1,17 @@
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
 *.pyd
-*.so
-*.egg-info/
-dist/
-build/
 
-# Virtual env
+# Virtual envs
 .venv/
 venv/
 env/
 
-# Env files
+# OS
+.DS_Store
+
+# Secrets
 .env
 .env.*
-
-# OS / editor
-.DS_Store
-.vscode/
-.idea/
