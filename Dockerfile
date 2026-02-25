@@ -16,9 +16,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api.py .
+COPY main.py .
 
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["bash", "-lc", "uvicorn api:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["bash", "-lc", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
