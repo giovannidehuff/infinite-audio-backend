@@ -1,5 +1,23 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Env files
 .env
+.env.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
