@@ -14,11 +14,18 @@ load_dotenv()
 # -----------------------------
 # Config
 # -----------------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.")
+
+# Fail fast if URL format is wrong (avoids DNS "Name or service not known" at first request)
+if not SUPABASE_URL.startswith("https://") or ".supabase.co" not in SUPABASE_URL:
+    raise RuntimeError(
+        "SUPABASE_URL must be your project URL, e.g. https://<project-ref>.supabase.co. "
+        "Check for typos, placeholders, or extra spaces in Render env vars."
+    )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
