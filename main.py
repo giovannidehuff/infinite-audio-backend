@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
@@ -191,6 +192,31 @@ async def mix_worker_loop():
 # -----------------------------
 app = FastAPI(title="Infinite Audio Backend", version="0.1.0")
 app.include_router(copilot_router, prefix="/session-copilot", tags=["Session Co-Pilot"])
+
+# -----------------------------
+# CORS
+# NOTE: allow_origins is set to ["*"] for initial end-to-end testing.
+# Before going to production, replace with the explicit list below.
+# Tighten this once the Lovable published URL is confirmed.
+# -----------------------------
+_ALLOWED_ORIGINS = [
+    # Local development
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8080",
+    # Lovable preview + published (replace with your actual URLs)
+    # "https://<your-project-id>.lovable.app",
+    # "https://infiniteaudio.co",
+    # "https://app.infiniteaudio.co",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # TODO: swap to _ALLOWED_ORIGINS before production
+    allow_credentials=False,      # must be False when allow_origins=["*"]
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 class MixJobRequest(BaseModel):
