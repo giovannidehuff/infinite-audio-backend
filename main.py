@@ -9,6 +9,8 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
+from app.routes.copilot import router as copilot_router
+
 load_dotenv()
 
 # -----------------------------
@@ -188,6 +190,7 @@ async def mix_worker_loop():
 # API
 # -----------------------------
 app = FastAPI(title="Infinite Audio Backend", version="0.1.0")
+app.include_router(copilot_router, prefix="/session-copilot", tags=["Session Co-Pilot"])
 
 
 class MixJobRequest(BaseModel):
