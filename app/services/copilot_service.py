@@ -4,6 +4,7 @@ from typing import Optional
 
 from app.models.schemas import CopilotRequest, CopilotResponse
 from app.providers.base import BaseCopilotProvider
+from app.providers.anthropic_provider import AnthropicCopilotProvider
 from app.providers.mock import MockCopilotProvider
 
 SESSIONS_TABLE = "session_history"
@@ -40,7 +41,12 @@ async def run_copilot_session(
     - Persists the session to Supabase best-effort (never blocks the response)
     """
     if provider is None:
-        provider = MockCopilotProvider()
+        # Prefer Anthropic when configured; otherwise keep the deterministic mock.
+        api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+        if api_key:
+            provider = AnthropicCopilotProvider()
+        else:
+            provider = MockCopilotProvider()
 
     session_id = str(uuid.uuid4())
     response = await provider.run(request, session_id)
