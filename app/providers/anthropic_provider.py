@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, Iterator, List, Optional
 
 import anthropic
 
@@ -9,6 +10,127 @@ from app.models.schemas import (
     CopilotResponse,
 )
 from app.providers.base import BaseCopilotProvider
+
+# Post-generation guardrails (string values only — avoids false hits on JSON keys like "sonic_direction").
+BANNED_PHRASES: List[str] = [
+    "atmospheric",
+    "backbone",
+    "build tension",
+    "cinematic",
+    "create space",
+    "dreamy",
+    "emotional depth",
+    "flowing delivery",
+    "foundation",
+    "full cinematic arrangement",
+    "introspective tracks",
+    "leave space",
+    "let it breathe",
+    "maintain the mood",
+    "signature style",
+    "sonic DNA",
+    "sonic landscape",
+    "sweet spot",
+    "vibe",
+]
+
+_MAX_RESPONSE_VALUE_CHARS = 1800
+
+_IMMEDIATE_BAD_PREFIXES = (
+    "start with ",
+    "begin with ",
+    "consider ",
+    "try ",
+    "maybe ",
+    "you ",
+    "first ",
+    "explore ",
+)
+
+# Imperative openers that satisfy "DAW-first" (extend as needed).
+_IMMEDIATE_VERBS = frozenset({
+    "load", "draw", "print", "commit", "bounce", "slice", "record", "program",
+    "set", "copy", "mute", "solo", "route", "bus", "send", "automate", "duplicate",
+    "quantize", "render", "export", "import", "layer", "stack", "pitch", "detune",
+    "resample", "compress", "sidechain", "filter", "tune", "transpose", "consolidate",
+    "freeze", "trim", "fade", "group", "arm", "monitor", "write", "open", "save",
+    "pull", "drop", "drag", "normalize", "stem", "bypass", "disable", "enable",
+    "reduce", "cut", "boost", "high-pass", "low-pass", "hpf", "lpf", "eq", "gain-stage",
+    "gainstage", "consolidate", "render", "export", "import", "duplicate", "split",
+    "merge", "glue", "sum", "route", "patch", "assign", "map",
+})
+
+_RETRY_USER_NUDGE = (
+    "REWRITE: Your last JSON failed post-checks (banned mood/tutorial phrasing in any string, "
+    "total text too long, or next_move.immediate not opening with a concrete DAW verb). "
+    "Return one valid JSON object only. Strip cinematic/mood words. Shorten all strings. "
+    "next_move.immediate must start with an imperative like Load, Draw, Program, Slice, Commit — "
+    "not “start with” or “consider”."
+)
+
+_RETRY_FILLER_NUDGE = (
+    "Your last output still contained banned filler/tutorial phrasing. "
+    "Remove all cinematic, emotional, atmospheric, and explanatory language. "
+    "Rewrite tighter and more technical. "
+    "Return one valid JSON object only with the same top-level keys."
+)
+
+_MAX_GENERATION_ATTEMPTS = 3
+
+
+def _iter_json_string_values(obj: Any) -> Iterator[str]:
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_json_string_values(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_json_string_values(item)
+
+
+def _values_char_count(response_json: dict) -> int:
+    return sum(len(s) for s in _iter_json_string_values(response_json))
+
+
+def _immediate_opener_valid(immediate: str) -> bool:
+    s = (immediate or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    for bad in _IMMEDIATE_BAD_PREFIXES:
+        if low.startswith(bad):
+            return False
+    first = s.split()[0]
+    first = re.sub(r"^[^A-Za-z0-9]+", "", first)
+    first = re.sub(r"[^A-Za-z0-9\-]+$", "", first)
+    if not first:
+        return False
+    token = first.lower()
+    if token in _IMMEDIATE_VERBS:
+        return True
+    head = token.split("-", 1)[0]
+    return head in _IMMEDIATE_VERBS
+
+
+def is_response_valid(response_json: dict) -> bool:
+    """
+    Lightweight post-model checks before Pydantic. Operates on the parsed model JSON only
+    (no session_id / provider).
+    """
+    blob = " ".join(s.lower() for s in _iter_json_string_values(response_json))
+    for phrase in BANNED_PHRASES:
+        if phrase.lower() in blob:
+            return False
+
+    if _values_char_count(response_json) > _MAX_RESPONSE_VALUE_CHARS:
+        return False
+
+    immediate = (response_json.get("next_move") or {}).get("immediate", "")
+    if not _immediate_opener_valid(str(immediate)):
+        return False
+
+    return True
 
 
 class AnthropicCopilotProvider(BaseCopilotProvider):
@@ -59,6 +181,16 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
             raise ValueError("Expected a top-level JSON object.")
         return parsed
 
+    def _parse_model_json(self, raw_text: str) -> Dict[str, Any]:
+        try:
+            return self._parse_json_strict(raw_text.strip())
+        except Exception:
+            start = raw_text.find("{")
+            end = raw_text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise
+            return self._parse_json_strict(raw_text[start : end + 1])
+
     async def run(self, request: CopilotRequest, session_id: str) -> CopilotResponse:
         target_artist = (request.target_artist or "").strip()
         mood = (request.mood or "").strip()
@@ -68,17 +200,66 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
         detected_bpm: Optional[int] = request.detected_bpm
 
         system_prompt = (
-            "You are a world-class music producer and arrangement consultant. "
-            "Generate producer-ready guidance for creating an original track/session based on the user brief. "
-            "Output must be strictly valid JSON and nothing else.\n\n"
-            "Hard requirements for quality:\n"
-            "- Adapt the plan to the target artist (specific production traits, drum feel, arrangement pacing).\n"
-            "- Adapt the plan to the mood/vibe (energy curve, density, sonic contrast).\n"
-            "- If mood or brief is weak/ambiguous, infer reasonable choices from the target artist + detected key/BPM.\n"
-            "- Avoid generic filler. Make each section distinct and actionable.\n"
-            "- Provide practical guidance (what to do next in production, not motivational fluff).\n"
-            "- Keep outputs concise but concrete.\n\n"
-            "Return only JSON that conforms to the requested schema. Do not wrap in markdown fences."
+            "You are Session Co-Pilot: one producer pass to another advanced producer. "
+            "Not a tutorial, blog, or product blurb.\n\n"
+            "OUTPUT\n"
+            "Return one JSON object only. No markdown fences, no text before or after the object. "
+            "Top-level keys must be exactly: key_and_tempo, sonic_direction, arrangement_outline, artist_fit, "
+            "reference_suggestions, next_move. Never echo session_brief, mood, or other request fields. "
+            "Do not output session_id, provider, or generated_at.\n\n"
+            "GLOBAL RULES\n"
+            "Assume an advanced producer. Never explain fundamentals. Never describe basic concepts "
+            "(808s, reverb, EQ, arrangement basics).\n"
+            "Ban soft, filler, or cinematic/mood fluff in every JSON string. Never generate these or close paraphrases: "
+            "build tension; create space; emotional depth; cinematic width; dreamy textures; atmospheric layers; "
+            "establish the mood; foundation; backbone; add movement; keep energy; let it breathe; melodic accessibility; "
+            "signature bounce; sonic landscape; sonic DNA; compliments the artist; fits the vibe.\n"
+            "If any banned phrase appears, the output is considered failed. Rewrite internally before returning.\n"
+            "If a sentence could appear in a YouTube tutorial, rewrite it.\n"
+            "Tone: short sentences; verb-first when possible; no storytelling; no adjectives unless they change a production "
+            "decision; prefer nouns and verbs over description.\n"
+            "Every sentence must imply a musical decision, a DAW action, a sound choice, or an arrangement change.\n"
+            "Prioritize compression over elegance. Fast session notes, not writing.\n"
+            "Never describe how the music feels unless that directly changes a production decision.\n\n"
+            "FIELD RULES (same schema)\n"
+            "key_and_tempo.key — One clear tonal center; must match harmony in key_notes.\n"
+            "key_and_tempo.key_notes — EXACTLY 1 short sentence: brief tonal reason + 1–2 harmonic moves "
+            "(Roman numerals or chords). No descriptive adjectives.\n"
+            "key_and_tempo.bpm_notes — EXACTLY 1 short sentence; must include groove mechanics "
+            "(swing %, subdivision, half-time vs full-time, hat grid, etc.). No general tempo explanation.\n"
+            "sonic_direction.headline — MAX 8 words. Production direction, not a vibe. No cinematic/mood language, no marketing.\n"
+            "sonic_direction.description — MAX 2 sentences. Each sentence = one concrete production move. No abstract description.\n"
+            "sonic_direction.textures — EXACTLY 4 lines: sub → mids → top → glue. Each line = one actionable layer or processing "
+            "move. No descriptive filler.\n"
+            "sonic_direction.avoid — EXACTLY 3 lines: frequency clashes, arrangement mistakes, or masking — specific to THIS "
+            "record. No generic advice.\n"
+            "artist_fit.primary — Target or best fit. similar — exactly 3 artist names.\n"
+            "artist_fit.why — EXACTLY 1 sentence. No praise. No obvious stylistic similarity lecture.\n"
+            "reference_suggestions.tracks — Exactly 3. Each why: EXACTLY 1 short sentence; only 2–3 production traits. "
+            "No emotional or descriptive commentary.\n"
+            "arrangement_outline.sections — 5–9 sections; functional names; believable bars.\n"
+            "arrangement_outline.sections[].note — EXACTLY 1 sentence: what enters, drops, doubles, mutes, or shifts. "
+            "No vague phrases.\n"
+            "next_move.immediate — MUST start with a verb. MUST be one concrete DAW action. MAX 20 words. No “start with”.\n"
+            "next_move.options — EXACTLY 4 options; each a distinct execution path; MAX 15 words each. "
+            "Ban generic actions: add texture, experiment, build atmosphere.\n\n"
+            "KEY AND BPM (no trap autopilot)\n"
+            "Do not reflexively pick F# minor or 138–142 BPM. Use F# minor only when brief + artist + mood warrant it; "
+            "otherwise rotate centers (e.g. A/B/D/G/E/C#/Eb minor darker; D/A/B/F#/Eb major brighter lift). "
+            "Modal or Phrygian color in key_notes if it fits.\n"
+            "Bright / uptempo / open-texture briefs: favor major or modal lift, slower or longer phrases, wider BPM range — "
+            "not the same minor grid every time.\n"
+            "No detected key/BPM: infer from session_brief + mood + target_artist if present. “Trap” alone ≠ F# + ~140.\n"
+            "No target_artist: infer from brief + mood (experimental / weird / distorted → rarer centers, broken swing, "
+            "off-grid drift where appropriate).\n"
+            "If detected_bpm is supplied: keep it unless it fights the brief.\n"
+            "Tempo bands (guides): half-time 66–84; mid swing/skip 86–112; driving 118–128; busy bounce 130–150; "
+            "broken 70–95 or uneven phrasing.\n\n"
+            "ARRANGEMENT\n"
+            "Avoid the same 7-part skeleton every time. Vary bar plans. Wide-score sections ≠ pocket bounce unless the brief "
+            "asks for both.\n\n"
+            "REFERENCES\n"
+            "Three tracks: overlap in drum/bass/vocal/mix moves with this session — not lazy chart defaults.\n"
         )
 
         user_prompt = {
@@ -91,51 +272,93 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
             "enable_key_bpm": request.enable_key_bpm,
             "enable_session_direction": request.enable_session_direction,
             "task": (
-                "Create a complete Session Co-Pilot response. "
+                "Create a complete Session Co-Pilot response for an advanced producer: compressed, peer-level "
+                "copy in every string — same schema, tighter wording (see system prompt).\n"
                 "Return a single JSON object with EXACTLY these top-level keys: "
                 "`key_and_tempo`, `sonic_direction`, `arrangement_outline`, `artist_fit`, "
                 "`reference_suggestions`, `next_move`.\n\n"
                 "Do NOT include `session_id`, `provider`, or `generated_at` (these are added by the backend).\n\n"
                 "Schema details:\n"
                 "- `key_and_tempo`: { key: string, bpm: number|null, key_notes: string, bpm_notes: string }\n"
+                "  If enable_key_bpm is false, keep key/bpm plausible but keep notes short.\n"
                 "- `sonic_direction`: { headline: string, description: string, textures: string[], avoid: string[] }\n"
+                "  textures: exactly 4 (stack order). avoid: exactly 3.\n"
                 "- `arrangement_outline`: { sections: [ { name: string, bars: string, note: string }, ... ] }\n"
+                "  5–9 sections; names and bar ranges must feel bespoke — follow the arrangement rules in the system prompt.\n"
                 "- `artist_fit`: { primary: string, similar: string[], why: string }\n"
+                "  similar: exactly 3 artists.\n"
                 "- `reference_suggestions`: { tracks: [ { artist: string, title: string, why: string }, ... ] }\n"
-                "- `next_move`: { immediate: string, options: string[] }\n\n"
-                "For `arrangement_outline.sections`, prefer 7 sections with these names: "
-                "Intro, Verse 1, Pre-Chorus, Chorus / Drop, Verse 2, Bridge / Break, Outro.\n\n"
-                "Use detected key/BPM when provided AND enabled; otherwise infer intelligently."
+                "  exactly 3 tracks.\n"
+                "- `next_move`: { immediate: string, options: string[] }\n"
+                "  options: exactly 4 strings.\n\n"
+                "When detected_key and detected_bpm are null and enable_key_bpm is true, infer key and BPM per "
+                "the KEY AND BPM section of the system prompt."
             ),
         }
 
-        resp = await self._client.messages.create(
-            model=self._model,
-            max_tokens=1400,
-            temperature=0.7,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": json.dumps(user_prompt)}],
-                }
-            ],
-        )
+        messages: List[dict] = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": json.dumps(user_prompt)}],
+            }
+        ]
 
-        raw_text = self._extract_text_block(resp)
+        parsed: Optional[Dict[str, Any]] = None
+        last_raw = ""
 
-        # Primary strict parsing. If the model accidentally returns surrounding whitespace,
-        # stripping usually makes it parseable while still enforcing JSON-only.
-        try:
-            parsed = self._parse_json_strict(raw_text.strip())
-        except Exception:
-            # Secondary attempt: extract the first JSON object substring.
-            # This only kicks in when the model adds non-JSON text despite instructions.
-            start = raw_text.find("{")
-            end = raw_text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            parsed = self._parse_json_strict(raw_text[start : end + 1])
+        for attempt in range(_MAX_GENERATION_ATTEMPTS):
+            resp = await self._client.messages.create(
+                model=self._model,
+                max_tokens=1800,
+                temperature=0.78,
+                system=system_prompt,
+                messages=messages,
+            )
+            last_raw = self._extract_text_block(resp)
+            try:
+                parsed = self._parse_model_json(last_raw)
+            except Exception:
+                if attempt >= _MAX_GENERATION_ATTEMPTS - 1:
+                    raise
+                messages.append(
+                    {"role": "assistant", "content": [{"type": "text", "text": last_raw}]}
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": _RETRY_USER_NUDGE
+                                + " Also: previous output was not valid JSON — return one JSON object only.",
+                            }
+                        ],
+                    }
+                )
+                continue
+
+            if is_response_valid(parsed):
+                break
+
+            if attempt < _MAX_GENERATION_ATTEMPTS - 1:
+                messages.append(
+                    {"role": "assistant", "content": [{"type": "text", "text": last_raw}]}
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": _RETRY_FILLER_NUDGE}],
+                    }
+                )
+
+        if parsed is None:
+            raise ValueError("Anthropic returned no parseable JSON.")
+
+        if not is_response_valid(parsed):
+            raise ValueError(
+                "Session Co-Pilot output failed post-generation checks after max attempts "
+                "(banned phrasing, length cap, or next_move.immediate)."
+            )
 
         payload = {
             **parsed,
