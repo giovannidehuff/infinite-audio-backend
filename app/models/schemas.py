@@ -74,6 +74,20 @@ class NextMoveCard(BaseModel):
     options: List[str]
 
 
+class RecommendedToolEntry(BaseModel):
+    """In-the-box tool hint: sound role + plugin options + dial-in guidance."""
+
+    role: str = Field(..., description="What this sound does in the track.")
+    plugins: List[str] = Field(
+        default_factory=list,
+        description="Plugin name options (any length; model may omit or vary).",
+    )
+    preset_hint: str = Field(
+        default="",
+        description="What to look for or how to dial it in — not an exact preset name.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level response
 # ---------------------------------------------------------------------------
@@ -86,6 +100,7 @@ class CopilotResponse(BaseModel):
     artist_fit: ArtistFitCard
     reference_suggestions: ReferenceSuggestionsCard
     next_move: NextMoveCard
+    recommended_tools: Optional[List[RecommendedToolEntry]] = Field(default_factory=list)
     generated_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

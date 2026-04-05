@@ -13,28 +13,27 @@ from app.providers.base import BaseCopilotProvider
 
 # Post-generation guardrails (string values only — avoids false hits on JSON keys like "sonic_direction").
 BANNED_PHRASES: List[str] = [
-    "atmospheric",
-    "backbone",
     "build tension",
-    "cinematic",
     "create space",
-    "dreamy",
     "emotional depth",
     "flowing delivery",
-    "foundation",
     "full cinematic arrangement",
     "introspective tracks",
-    "leave space",
     "let it breathe",
     "maintain the mood",
-    "signature style",
     "sonic DNA",
     "sonic landscape",
-    "sweet spot",
-    "vibe",
+    "record violin",
+    "record cello",
+    "record strings",
+    "recorded violin",
+    "recorded strings",
+    "recorded cello",
+    "tracking session",
+    "room takes",
 ]
 
-_MAX_RESPONSE_VALUE_CHARS = 1800
+_MAX_RESPONSE_VALUE_CHARS = 2100
 
 _IMMEDIATE_BAD_PREFIXES = (
     "start with ",
@@ -200,12 +199,15 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
         detected_bpm: Optional[int] = request.detected_bpm
 
         system_prompt = (
-            "You are Session Co-Pilot: one producer pass to another advanced producer. "
-            "Not a tutorial, blog, or product blurb.\n\n"
+            "You are Session Co-Pilot: one producer passing session notes to another advanced producer. "
+            "Not a tutorial, blog, or product blurb.\n"
+            "This is a 100% in-the-box tool. Every output assumes the producer is in a DAW with software only — "
+            "no hardware, no live recording, no microphones, no outboard gear. Any reference to live instruments "
+            "must be silently translated to its software equivalent before output.\n\n"
             "OUTPUT\n"
             "Return one JSON object only. No markdown fences, no text before or after the object. "
             "Top-level keys must be exactly: key_and_tempo, sonic_direction, arrangement_outline, artist_fit, "
-            "reference_suggestions, next_move. Never echo session_brief, mood, or other request fields. "
+            "reference_suggestions, next_move, recommended_tools. Never echo session_brief, mood, or other request fields. "
             "Do not output session_id, provider, or generated_at.\n\n"
             "GLOBAL RULES\n"
             "Assume an advanced producer. Never explain fundamentals. Never describe basic concepts "
@@ -232,7 +234,7 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
             "sonic_direction.textures — EXACTLY 4 lines: sub → mids → top → glue. Each line = one actionable layer or processing "
             "move. No descriptive filler.\n"
             "sonic_direction.avoid — EXACTLY 3 lines: frequency clashes, arrangement mistakes, or masking — specific to THIS "
-            "record. No generic advice.\n"
+            "mix. No generic advice.\n"
             "artist_fit.primary — Target or best fit. similar — exactly 3 artist names.\n"
             "artist_fit.why — EXACTLY 1 sentence. No praise. No obvious stylistic similarity lecture.\n"
             "reference_suggestions.tracks — Exactly 3. Each why: EXACTLY 1 short sentence; only 2–3 production traits. "
@@ -241,8 +243,15 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
             "arrangement_outline.sections[].note — EXACTLY 1 sentence: what enters, drops, doubles, mutes, or shifts. "
             "No vague phrases.\n"
             "next_move.immediate — MUST start with a verb. MUST be one concrete DAW action. MAX 20 words. No “start with”.\n"
+            "next_move.immediate — ADDITIONAL CONSTRAINTS:\n"
+            "- Never mention \"click track\", \"over a click\", \"metronome\", or \"over BPM click\" — the producer knows to use a click.\n"
+            "- Never state obvious DAW defaults (quantize to grid, use headphones, etc.).\n"
+            "- Never explain WHY to do the action — just state the action.\n"
+            "- The instruction must be something only THIS session would need, not generic advice.\n"
             "next_move.options — EXACTLY 4 options; each a distinct execution path; MAX 15 words each. "
-            "Ban generic actions: add texture, experiment, build atmosphere.\n\n"
+            "Ban generic actions: add texture, experiment, build atmosphere.\n"
+            "recommended_tools — EXACTLY 3–5 objects. Each object: role (string), plugins (array of 2–4 plugin name strings), "
+            "preset_hint (string). Tailor to this session’s sounds. Follow PLUGIN RULE and RECOMMENDED TOOLS RULE below.\n\n"
             "KEY AND BPM (no trap autopilot)\n"
             "Do not reflexively pick F# minor or 138–142 BPM. Use F# minor only when brief + artist + mood warrant it; "
             "otherwise rotate centers (e.g. A/B/D/G/E/C#/Eb minor darker; D/A/B/F#/Eb major brighter lift). "
@@ -260,6 +269,53 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
             "asks for both.\n\n"
             "REFERENCES\n"
             "Three tracks: overlap in drum/bass/vocal/mix moves with this session — not lazy chart defaults.\n"
+            "\n"
+            "---\n"
+            "\n"
+            "SCOPE RULE — ABSOLUTE:\n"
+            "This tool is 100% in-the-box. The producer is working in a DAW with software only.\n"
+            "\n"
+            "NEVER output:\n"
+            "- Any instruction to capture live audio (e.g. mic a violin, track acoustic drums, room takes)\n"
+            "- Any hardware unit by name (API, SSL, Neve, Echoplex, tape machines, preamps, amps)\n"
+            "- Any reference to microphones, DI boxes, or physical signal chain\n"
+            "- The word \"record\" unless it means draw/edit MIDI in the piano roll or bounce/export audio in the DAW\n"
+            "\n"
+            "ALWAYS output:\n"
+            "- Instrument or sound descriptions followed by plugin examples in parentheses\n"
+            "- MIDI programming instructions\n"
+            "- DAW routing (sends, buses, sidechains, automation lanes)\n"
+            "- Software-based mix decisions\n"
+            "\n"
+            "PLUGIN RULE:\n"
+            "Never prescribe a specific plugin as the only option.\n"
+            "Always describe the sound or instrument type first, then suggest 2–3 plugin examples in parentheses as options.\n"
+            "Format: string ensemble patch (Kontakt, Arcade, Spitfire LABS)\n"
+            "Format: analog bass synth (Serum, Massive, Vital)\n"
+            "Format: room reverb (Valhalla Room, Eventide Blackhole)\n"
+            "The producer chooses what they have. You only guide the sound direction.\n"
+            "\n"
+            "If the brief implies live instruments → translate silently to software equivalent:\n"
+            "- live strings → string ensemble patch (Kontakt, Arcade, Spitfire LABS)\n"
+            "- live drums → drum sampler (Superior Drummer, Battery, Slate Drums)\n"
+            "- live guitar → guitar VST (Shreddage, Amplesoft, Strum GS)\n"
+            "Never acknowledge the translation. Just output the in-the-box version.\n"
+            "\n"
+            "---\n"
+            "\n"
+            "RECOMMENDED TOOLS RULE:\n"
+            "Every response must include a recommended_tools array (3–5 entries) based on sounds and textures in the session.\n"
+            "Each entry must have: role (string), plugins (array of 2–4 plugin name strings), preset_hint (string).\n"
+            "preset_hint = general dial-in guidance, not an exact preset name.\n"
+            "Example entry: role \"808 sub bass\", plugins [\"Serum\", \"Vital\", \"808 Studio II\"], "
+            "preset_hint \"Sine wave start, pitch envelope drop 4–6 semitones, light saturation\"\n"
+            "Example entry: role \"Orchestral string ensemble\", plugins [\"Kontakt\", \"Spitfire LABS\", \"Arcade\"], "
+            "preset_hint \"Legato or sustain articulations, layer two patches panned slightly L and R\"\n"
+            "Example entry: role \"Trap drum kit\", plugins [\"Superior Drummer 3\", \"Battery 4\", \"Slate Drums\"], "
+            "preset_hint \"Punchy room kit, pull snare attack back, HPF kick above 40Hz\"\n"
+            "Include recommended_tools on every generation regardless of brief.\n"
+            "\n"
+            "---\n"
         )
 
         user_prompt = {
@@ -276,7 +332,7 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
                 "copy in every string — same schema, tighter wording (see system prompt).\n"
                 "Return a single JSON object with EXACTLY these top-level keys: "
                 "`key_and_tempo`, `sonic_direction`, `arrangement_outline`, `artist_fit`, "
-                "`reference_suggestions`, `next_move`.\n\n"
+                "`reference_suggestions`, `next_move`, `recommended_tools`.\n\n"
                 "Do NOT include `session_id`, `provider`, or `generated_at` (these are added by the backend).\n\n"
                 "Schema details:\n"
                 "- `key_and_tempo`: { key: string, bpm: number|null, key_notes: string, bpm_notes: string }\n"
@@ -290,7 +346,9 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
                 "- `reference_suggestions`: { tracks: [ { artist: string, title: string, why: string }, ... ] }\n"
                 "  exactly 3 tracks.\n"
                 "- `next_move`: { immediate: string, options: string[] }\n"
-                "  options: exactly 4 strings.\n\n"
+                "  options: exactly 4 strings.\n"
+                "- `recommended_tools`: [ { role: string, plugins: string[], preset_hint: string }, ... ]\n"
+                "  3–5 entries; each plugins array has 2–4 plugin names.\n\n"
                 "When detected_key and detected_bpm are null and enable_key_bpm is true, infer key and BPM per "
                 "the KEY AND BPM section of the system prompt."
             ),
@@ -315,6 +373,8 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
                 messages=messages,
             )
             last_raw = self._extract_text_block(resp)
+            import logging
+            logging.getLogger(__name__).warning("RAW MODEL OUTPUT: %s", last_raw)
             try:
                 parsed = self._parse_model_json(last_raw)
             except Exception:
@@ -356,8 +416,8 @@ class AnthropicCopilotProvider(BaseCopilotProvider):
 
         if not is_response_valid(parsed):
             raise ValueError(
-                "Session Co-Pilot output failed post-generation checks after max attempts "
-                "(banned phrasing, length cap, or next_move.immediate)."
+                "Session Co-Pilot could not generate a clean response. "
+                "Please try again with a shorter or more specific brief."
             )
 
         payload = {

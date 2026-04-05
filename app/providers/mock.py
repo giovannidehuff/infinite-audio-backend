@@ -6,6 +6,7 @@ from app.models.schemas import (
     CopilotResponse,
     KeyTempoCard,
     NextMoveCard,
+    RecommendedToolEntry,
     ReferenceTrack,
     ReferenceSuggestionsCard,
     SonicDirectionCard,
@@ -143,4 +144,21 @@ class MockCopilotProvider(BaseCopilotProvider):
                     "Pull up a reference mix and A/B from the start",
                 ],
             ),
+            recommended_tools=[
+                RecommendedToolEntry(
+                    role="808 sub bass",
+                    plugins=["Serum", "Vital", "808 Studio II"],
+                    preset_hint="Sine-heavy body, pitch envelope drop ~4–6 semitones, light saturation.",
+                ),
+                RecommendedToolEntry(
+                    role="Trap drum kit",
+                    plugins=["Superior Drummer 3", "Battery 4", "Slate Drums"],
+                    preset_hint="Tight room kit; shorten snare attack; HPF kick ~40 Hz.",
+                ),
+                RecommendedToolEntry(
+                    role="Wide pad layer",
+                    plugins=["Valhalla Supermassive", "Portal", "RC-20"],
+                    preset_hint="Long decay, slow filter automation, keep lows mono.",
+                ),
+            ],
         )
